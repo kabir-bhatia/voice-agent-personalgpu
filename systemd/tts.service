@@ -1,0 +1,9 @@
+[Unit]
+Description=IndicF5 TTS
+[Service]
+ExecStart=%h/start_tts.sh
+Restart=always
+StandardOutput=append:%h/tts.log
+StandardError=append:%h/tts.log
+[Install]
+WantedBy=default.target

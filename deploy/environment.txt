@@ -1,0 +1,8 @@
+# GPU snapshot
+name, memory.total [MiB], driver_version
+NVIDIA L4, 23034 MiB, 580.159.03
+
+# docker images
+vllm/vllm-openai:latest
+livekit/livekit-server:latest
+livekit/caddyl4:latest

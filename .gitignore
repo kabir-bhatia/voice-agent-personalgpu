@@ -1,0 +1,33 @@
+# --- secrets (NEVER commit) ---
+.env
+.env.local
+.env.*
+!.env.example
+*.json
+service-account*.json
+*_key
+*.pem
+# rendered LiveKit config (contains API key/secret) + TLS certs
+livekit/livekit.yaml
+livekit/caddy.yaml
+livekit/caddy_data/
+
+# --- venvs / build / caches ---
+.venv/
+.venv-f5/
+**/.venv/
+**/.venv-f5/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# --- model weights / caches / logs ---
+*.pt
+*.bin
+*.safetensors
+hf-cache/
+*.log
+
+# --- os ---
+.DS_Store
+Thumbs.db

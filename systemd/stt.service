@@ -1,0 +1,9 @@
+[Unit]
+Description=IndicConformer STT
+[Service]
+ExecStart=%h/start_stt.sh
+Restart=always
+StandardOutput=append:%h/stt.log
+StandardError=append:%h/stt.log
+[Install]
+WantedBy=default.target

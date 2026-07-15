@@ -1,0 +1,32 @@
+[project]
+name = "v6"
+version = "0.1.0"
+requires-python = ">=3.12"
+# Phase 1 Hindi: self-hosted Whisper STT + Gemini LLM + Google Cloud hi-IN TTS.
+# The [google] extra is back for Gemini LLM + Google Cloud TTS; openai plugin still
+# drives the self-hosted Whisper STT endpoint.
+dependencies = [
+    "livekit-agents[google,silero]>=1.6",
+    "livekit-api>=1.1.0",
+    "livekit-plugins-noise-cancellation~=0.2",
+    "livekit-plugins-openai>=1.6",
+    "python-dotenv>=1.2.2",
+    # tester_agent.py deps:
+    "httpx>=0.27.0",   # local IndicConformer STT HTTP calls
+    "numpy>=1.26.0",   # dBFS audio level calculation
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.12.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+python_classes = ["Test*"]
+asyncio_mode = "auto"
+
+

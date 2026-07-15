@@ -1,0 +1,23 @@
+# LiveKit SFU config (single node). Rendered from this template by up.sh via envsubst
+# (${DOMAIN} / ${LIVEKIT_API_KEY} / ${LIVEKIT_API_SECRET} come from .env). Do not edit the
+# rendered livekit.yaml by hand — edit this template.
+port: 7880
+bind_addresses:
+  - ""
+log_level: info
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  # GCP (and most clouds) put the VM behind 1:1 NAT, so the SFU must advertise its PUBLIC IP in
+  # ICE candidates or all media silently fails. This is the single most important self-host flag.
+  use_external_ip: true
+turn:
+  enabled: true
+  domain: ${DOMAIN}
+  # TLS is terminated by Caddy on :443 and multiplexed with WSS; LiveKit's TURN listens here.
+  tls_port: 5349
+  udp_port: 3478
+  external_tls: true
+keys:
+  ${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}

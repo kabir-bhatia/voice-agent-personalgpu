@@ -1,0 +1,10 @@
+[Unit]
+Description=LiveKit Voice Agent
+[Service]
+WorkingDirectory=%h/v6
+ExecStart=%h/v6/.venv/bin/python agent.py dev
+Restart=always
+StandardOutput=append:%h/agent.log
+StandardError=append:%h/agent.log
+[Install]
+WantedBy=default.target

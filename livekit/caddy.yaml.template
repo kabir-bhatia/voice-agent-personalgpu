@@ -1,0 +1,45 @@
+# Caddy (layer4) config: auto Let's Encrypt cert for ${DOMAIN}, then multiplex :443 between
+# WSS signaling (-> LiveKit :7880) and TURN/TLS (-> LiveKit :5349). Rendered by up.sh via envsubst.
+# This is LiveKit's canonical self-host Caddy config.
+logging:
+  logs:
+    default:
+      level: INFO
+storage:
+  "module": "file_system"
+  "root": "/data"
+apps:
+  tls:
+    certificates:
+      automate:
+        - ${DOMAIN}
+  layer4:
+    servers:
+      main:
+        listen:
+          - ":443"
+        routes:
+          # HTTPS / WSS signaling: terminate TLS (http/1.1) and reverse-proxy to the SFU.
+          - match:
+              - tls:
+                  sni:
+                    - "${DOMAIN}"
+            handle:
+              - handler: tls
+                connection_policies:
+                  - alpn:
+                      - http/1.1
+              - handler: proxy
+                upstreams:
+                  - dial:
+                      - localhost:7880
+          # TURN/TLS: pass the raw TLS stream through to LiveKit's TURN TLS port.
+          - match:
+              - tls:
+                  sni:
+                    - "${DOMAIN}"
+            handle:
+              - handler: proxy
+                upstreams:
+                  - dial:
+                      - localhost:5349
