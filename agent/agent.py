@@ -1,6 +1,9 @@
+import asyncio
+import json
 import os
 import sys
 from datetime import UTC, datetime
+from itertools import count
 
 if sys.platform == "win32":
     import platform as _platform
@@ -34,6 +37,8 @@ from livekit.agents import (
 from livekit.agents.tokenize import _basic_sent, token_stream, tokenizer as _tk
 from livekit.plugins import noise_cancellation, openai, silero
 
+from visemes import text_to_visemes
+
 
 def _split_sentences_hi(text, *, min_sentence_len=20, retain_format=False):
     # The framework's English splitter treats only [.!?] as sentence ends, NOT the Hindi danda '।',
@@ -59,6 +64,42 @@ class HindiSentenceTokenizer(_tk.SentenceTokenizer):
             min_token_len=self._min,
             min_ctx_len=self._ctx,
         )
+
+# --- Lip-sync avatar: publish a viseme timeline per spoken sentence -------------------------
+# The browser avatar (avatar-client/) lip-syncs a cartoon face. The StreamAdapter tokenizes the
+# LLM reply into sentences and calls the inner TTS's synthesize(sentence) once per sentence — the
+# exact point where we know each sentence's text just as its audio is about to be produced. We
+# derive a viseme timeline from the text (visemes.text_to_visemes) and publish it into the room on
+# a data channel; the client anchors each timeline to the real audio onset and animates the mouth.
+# This rides a parallel data channel — it never touches the tuned audio bytes or latency.
+VISEME_TOPIC = "lk.viseme"
+_viseme_seq = count(1)
+_room = None  # set to ctx.room in entrypoint() so the TTS wrapper can publish
+
+
+def _publish_visemes(text: str) -> None:
+    room = _room
+    if room is None or not text.strip():
+        return
+    try:
+        timeline = text_to_visemes(text)
+        payload = json.dumps(
+            {"id": next(_viseme_seq), "visemes": timeline}, ensure_ascii=False
+        )
+        asyncio.get_running_loop().create_task(
+            room.local_participant.publish_data(payload, topic=VISEME_TOPIC, reliable=True)
+        )
+    except Exception as e:  # lip-sync must never break speech
+        print(f"[viseme] publish failed: {e}")
+
+
+class VisemeTTS(openai.TTS):
+    """openai.TTS that also publishes a viseme timeline for each sentence it synthesizes."""
+
+    def synthesize(self, text, **kwargs):
+        _publish_visemes(text)
+        return super().synthesize(text, **kwargs)
+
 
 STT_BASE_URL = os.environ.get("STT_BASE_URL", "http://localhost:8001/v1")
 STT_MODEL = os.environ.get("STT_MODEL", "indic-conformer")
@@ -89,29 +130,45 @@ def prewarm(proc: JobProcess) -> None:
     proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.40)
 
 
+def _instructions_for(lang: str) -> str:
+    # Language name + example number/word transliterations per language. The rest of the prompt
+    # structure (concise-by-default, plain speech, Devanagari-only) is shared. All current languages
+    # use Devanagari script; add script-specific variants when extending beyond Devanagari.
+    cfg = {
+        "hi": ("Hindi", "Devanagari (Hindi)",
+               "'2024' -> 'दो हज़ार चौबीस', 'IIT Delhi' -> 'आई आई टी दिल्ली'"),
+        "mr": ("Marathi", "Devanagari (Marathi)",
+               "'2024' -> 'दोन हजार चोवीस', 'IIT Delhi' -> 'आय आय टी दिल्ली'"),
+    }
+    name, script, examples = cfg.get(lang, cfg["hi"])
+    return (
+        "You are a friendly voice assistant on a PHONE CALL with an Indian user. "
+        "CRITICAL rules for every reply:\n"
+        "1. Be concise BY DEFAULT: for normal answers, reply in 1-2 short spoken sentences (max ~30 words). "
+        "Keep the first sentence extremely short so you can reply instantly. BUT if the user explicitly asks for a "
+        "story, explanation, or a list of things, give the FULL answer in one flowing, continuous reply — do not chop "
+        f"it into tiny pieces or stop after one line. Still keep it natural spoken {name}.\n"
+        "2. Plain speech ONLY - no markdown, no bullet points, no numbered lists, no asterisks or headings. It will be read aloud by a TTS engine.\n"
+        f"3. LANGUAGE: Always reply in {name} only, even if the user speaks English or another "
+        f"language. Keep it natural and conversational spoken {name}.\n"
+        "4. Sound human and quick. If more detail is needed, give the short version first and offer to elaborate.\n"
+        f"5. SCRIPT: Write your ENTIRE reply in {script} script only. The TTS engine "
+        f"cannot pronounce Latin letters or digits. Spell ALL numbers as {name} words and transliterate every "
+        f"English or proper noun into Devanagari (e.g. {examples}). "
+        "Never output Latin characters or Arabic numerals.\n"
+        "6. GREETING ONCE: Only greet at the very first message of the call. In EVERY later reply do NOT say "
+        "नमस्ते/नमस्कार or repeat the user's name — that sounds robotic. Just answer directly and naturally."
+    )
+
+
 class VoiceAgent(Agent):
-    def __init__(self) -> None:
-        super().__init__(
-            instructions=(
-                "You are a friendly voice assistant on a PHONE CALL with an Indian user. "
-                "CRITICAL rules for every reply:\n"
-                "1. Be concise BY DEFAULT: for normal answers, reply in 1-2 short spoken sentences (max ~30 words). "
-                "Keep the first sentence extremely short so you can reply instantly. BUT if the user explicitly asks for a "
-                "story, explanation, or a list of things, give the FULL answer in one flowing, continuous reply — do not chop "
-                "it into tiny pieces or stop after one line. Still keep it natural spoken Hindi.\n"
-                "2. Plain speech ONLY - no markdown, no bullet points, no numbered lists, no asterisks or headings. It will be read aloud by a TTS engine.\n"
-                "3. LANGUAGE: Always reply in HINDI only, even if the user speaks English or another language. Keep it natural and conversational spoken Hindi.\n"
-                "4. Sound human and quick. If more detail is needed, give the short version first and offer to elaborate.\n"
-                "5. SCRIPT: Write your ENTIRE reply in Devanagari (Hindi) script only. The TTS engine "
-                "cannot pronounce Latin letters or digits. Spell ALL numbers as Hindi words (e.g. '14वीं' "
-                "-> 'चौदहवीं', '2024' -> 'दो हज़ार चौबीस'). Transliterate every English or proper noun into "
-                "Devanagari (e.g. \"Humayun's Tomb\" -> 'हुमायूँ का मकबरा', 'IIT Delhi' -> 'आई आई टी दिल्ली'). "
-                "Never output Latin characters or Arabic numerals."
-            ),
-        )
+    def __init__(self, lang: str = "hi") -> None:
+        super().__init__(instructions=_instructions_for(lang))
 
 
 async def entrypoint(ctx: JobContext):
+    global _room
+    _room = ctx.room  # let VisemeTTS publish the lip-sync timeline into this room
     vad = ctx.proc.userdata["vad"]
     session = AgentSession(
         vad=vad,
@@ -131,7 +188,7 @@ async def entrypoint(ctx: JobContext):
             temperature=0.7,
         ),
         tts=tts_module.StreamAdapter(
-            tts=openai.TTS(
+            tts=VisemeTTS(
                 model=TTS_MODEL,
                 voice="indicf5",
                 api_key="not-needed",
@@ -176,7 +233,7 @@ async def entrypoint(ctx: JobContext):
         print(f"BENCH_ASSISTANT ts={_iso_utc()} role={role} text={ev.item.text_content!r}")
 
     await session.start(
-        agent=VoiceAgent(),
+        agent=VoiceAgent(lang=STT_LANGUAGE[:2]),
         room=ctx.room,
         room_input_options=room_io.RoomInputOptions(
             noise_cancellation=noise_cancellation.BVC(),

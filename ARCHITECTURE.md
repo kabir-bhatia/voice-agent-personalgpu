@@ -7,14 +7,18 @@ value reflects the **currently running** pipeline.
 
 > Language: Hindi (`hi`) on the hot path. Marathi is validated as a second language (same models; see
 > "Multi-language" below).
+>
+> Front-end: either the generic **meet.livekit.io** (audio only) or the bundled **`avatar-client/`** —
+> a lightweight browser page that renders a **lip-synced cartoon avatar** (see §9). The avatar adds
+> **no GPU load** (it runs entirely in the browser).
 
 ---
 
 ## 1. Topology
 
 ```
- Phone / laptop browser (meet.livekit.io)
-        │  WebRTC (WSS/TURN, TLS via Caddy on :443)
+ Browser front-end:  meet.livekit.io (audio)   OR   avatar-client/ (lip-synced cartoon)
+        │  WebRTC (WSS/TURN, TLS via Caddy on :443) — audio track ▲ + viseme data channel ▲
         ▼
  ┌─────────────────────────────  GCP L4 VM (asia-south1-b, Mumbai)  ─────────────────────────────┐
  │  LiveKit SFU (docker)            livekit/livekit-server + caddyl4                              │
@@ -23,16 +27,17 @@ value reflects the **currently running** pipeline.
  │        ▼                                                                                        │
  │  Agent (systemd --user: agent.service)   livekit-agents 1.6.2, agent.py                        │
  │     VAD (silero) → endpointing (dynamic + turn-detector) → STT → LLM → TTS (sentence-streamed) │
- │        │              │                 │                                                       │
- │        ▼              ▼                 ▼                                                       │
+ │        │              │                 │            └─ VisemeTTS also publishes a viseme       │
+ │        ▼              ▼                 ▼               timeline on the `lk.viseme` data channel │
  │  STT :8001        LLM :8000         TTS :8002                                                   │
- │  IndicConformer   Gemma-3-12B AWQ   IndicF5                                                     │
+ │  IndicConformer   Gemma-3-12B AWQ   IndicF5 (+ /v1/visemes)                                     │
  │  (systemd)        (docker, vLLM)    (systemd)                                                   │
  └────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 All three model servers expose **OpenAI-compatible** HTTP APIs on loopback, so the LiveKit `openai`
-plugin drives them unmodified.
+plugin drives them unmodified. The avatar rides a parallel WebRTC **data channel** and never touches
+the tuned audio path.
 
 ---
 
@@ -50,7 +55,8 @@ plugin drives them unmodified.
 | Process mgr | **systemd --user** services (`loginctl enable-linger` REQUIRED) + one docker container for vLLM |
 
 **GPU memory budget (all co-resident):** vLLM 12B ≈ 9.3 GB weights (gpu-util 0.55 ≈ 12.6 GB reserved),
-STT ≈ 1–2 GB, TTS ≈ 2–3 GB. Total ≈ 19–20 GB of 23 GB.
+STT ≈ 1–2 GB, TTS ≈ 2–3 GB. Total ≈ 19–20 GB of 23 GB. The **avatar adds 0 GB** — visemes are a few ms
+of CPU and the cartoon is drawn in the browser.
 
 ---
 
@@ -95,6 +101,12 @@ STT ≈ 1–2 GB, TTS ≈ 2–3 GB. Total ≈ 19–20 GB of 23 GB.
 
 - Non-streaming per utterance, but the reply is split into sentences and each is synthesized+returned
   as soon as ready → low first-audio latency. `nfe=10` gives TTS first-byte ≈ 0.8 s (short chunk).
+- **Viseme endpoint (`/v1/visemes`, for the avatar):** `tts/visemes.py` derives a mouth-shape timeline
+  from Devanagari text (rule-based grapheme→phoneme → 12-viseme set, timed over the real audio duration
+  with an energy-weighted envelope). During synthesis the timeline is cached per sentence; `/v1/visemes`
+  serves it (cache hit = audio-accurate, miss = text-only estimate). See §9.
+- **`F5_NUMBER_LANG`:** the Hindi number-word backstop only applies when `hi`; other languages rely on
+  the LLM spelling numbers in-language (avoids speaking Hindi number words inside Marathi).
 
 ### 3.4 Agent (systemd: `agent.service`)
 - `agent/agent.py`, `livekit-agents==1.6.2`, `openai` + `silero` plugins.
@@ -110,7 +122,14 @@ STT ≈ 1–2 GB, TTS ≈ 2–3 GB. Total ≈ 19–20 GB of 23 GB.
 - **Not enabled (by design):** preemptive generation (measured no benefit + GPU contention); native
   backchannel ("go on, I'm listening") — cloud-only in the SDK, unavailable with the offline detector.
 - **System prompt:** concise-by-default, Devanagari-only, spell numbers as Hindi words, transliterate
-  English → Devanagari (TTS can't voice Latin/digits). Per-language greeting map for hi/mr/gu/pa/bn.
+  English → Devanagari (TTS can't voice Latin/digits). **Greet only once** (rule 6 — no re-greeting each
+  turn). Per-language greeting map for hi/mr/gu/pa/bn.
+- **Language switch:** `_instructions_for(lang)` builds per-language instructions (hi/mr today);
+  `VoiceAgent(lang=STT_LANGUAGE[:2])` and `openai.STT(language=STT_LANGUAGE)` are driven by one env var,
+  so the whole pipeline flips hi↔mr by setting `STT_LANGUAGE` (+ `F5_NUMBER_LANG`) and restarting.
+- **Avatar hook:** `VisemeTTS(openai.TTS)` wraps the TTS — for each sentence it publishes a viseme
+  timeline on the `lk.viseme` data channel just as the audio is produced. Purely additive; the audio
+  path is unchanged. See §9.
 
 ### 3.5 LiveKit SFU (docker compose in `livekit/`)
 - `livekit/livekit-server` + `livekit/caddyl4`. Config rendered from `*.template` by `up.sh` (envsubst
@@ -216,3 +235,43 @@ major Indian languages. Marathi (`mr`) uses the **same Devanagari script** as Hi
 existing prompt/tokenizer by switching `STT_LANGUAGE=mr`, the greeting, and the system-prompt language.
 See `MARATHI_RESULTS.md` for the latency delta and accuracy findings vs Hindi. Gujarati / Punjabi /
 Bengali need per-script prompt + (likely) per-language TTS reference clips — future work.
+
+---
+
+## 9. Lip-sync avatar (`avatar-client/`)
+
+An optional browser front-end that renders a **lip-synced cartoon face** (Animoji-style) instead of the
+generic meet.livekit.io audio call. **Design goal: fast + fully self-hosted + zero extra GPU.** A
+photoreal approach (MuseTalk/Tavus-class) was rejected — it needs 3–4 GB VRAM and per-frame GPU that
+would contend with the voice pipeline, and it can't render a cartoon. Instead the face is a
+**viseme-rigged 2D SVG** drawn entirely in the browser.
+
+**Pieces**
+- `tts/visemes.py` — Devanagari grapheme→phoneme → **12-viseme set** (Oculus/Preston-Blair:
+  `sil PP FF TH DD kk CH SS nn RR aa E ih oh ou`), timed over the real audio with an energy-weighted
+  envelope. Shared by the TTS server (`/v1/visemes`, cached during synthesis) and the agent.
+- `agent.py::VisemeTTS` — publishes each sentence's timeline on the `lk.viseme` LiveKit data channel.
+- `avatar-client/` — static page (`index.html` + `avatar.js`) using the vendored `livekit-client` UMD
+  bundle (no CDN). Connects with a join token, plays the agent audio, and animates the mouth.
+
+**Sync approach (current).** The client is **audio-driven**: it routes the agent's audio *through* Web
+Audio so the analysed samples are exactly what's played (no lead/lag), then drives the mouth from that
+audio in real time — RMS envelope → jaw openness (hard noise-gate, so the mouth shuts the instant audio
+stops), spectral bands → vowel shape (rounded oh/ou vs wide E/ih vs sibilant SS/CH), and a sharp
+**energy-dip detector** → bilabial/stop **lip closures** (म/ब/प). This gives inherently tight timing
+because everything is derived from the played audio. The server viseme timeline (`lk.viseme`) is still
+published and is the better source for a future **3D-mesh rig**; it is not required by the current 2D
+client. `?debug=1` shows a live RMS/viseme/closure overlay for threshold tuning.
+
+**Run it**
+```bash
+# serve the static client (any static host; localhost is a secure context so the mic works)
+cd avatar-client && python -m http.server 8777 --bind 127.0.0.1
+# open in Chrome (mint the token with livekit/gen_token.py --room <room> --identity me):
+#   http://localhost:8777/index.html?url=wss://<DOMAIN>&token=<TOKEN>
+```
+
+**Known limitations / next steps.** Lip-sync shape accuracy for non-bilabial consonants is approximate
+(spectral heuristic); an adaptive noise floor and blending the server's energy-accurate phoneme timeline
+are the next refinements. Hosting the page on the VM over HTTPS (so any device can use it without a local
+server) is a separate, pending task.

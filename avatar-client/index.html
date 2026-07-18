@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Voice Agent — Avatar</title>
+<style>
+  :root { --bg:#0e1116; --panel:#161b22; --accent:#4c8dff; --ok:#2ea043; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:#e6edf3;
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  #app { height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px; }
+  #stage { width:min(90vw,460px); aspect-ratio:1/1; }
+  svg { width:100%; height:100%; display:block; }
+  #bar { display:flex; gap:10px; align-items:center; font-size:14px; color:#9aa7b4; }
+  #dot { width:10px; height:10px; border-radius:50%; background:#6e7681; }
+  #dot.on { background:var(--ok); }
+  button { background:var(--accent); color:#fff; border:0; border-radius:10px;
+    padding:14px 26px; font-size:16px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  #overlay { position:fixed; inset:0; background:rgba(8,10,14,.82); display:flex;
+    flex-direction:column; align-items:center; justify-content:center; gap:16px; text-align:center; padding:24px; }
+  #overlay p { max-width:340px; color:#9aa7b4; line-height:1.5; }
+  #err { color:#ff7b72; font-size:13px; min-height:16px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <!-- Cartoon head. JS drives eyes (blink), mouth (visemes), and a subtle sway on #head. -->
+    <svg viewBox="0 0 300 300" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <radialGradient id="skin" cx="45%" cy="38%" r="70%">
+          <stop offset="0%" stop-color="#ffd479"/><stop offset="100%" stop-color="#f4a63a"/>
+        </radialGradient>
+      </defs>
+      <g id="head">
+        <ellipse cx="150" cy="155" rx="105" ry="115" fill="url(#skin)"/>
+        <!-- ears -->
+        <circle cx="45" cy="155" r="20" fill="#f0982f"/>
+        <circle cx="255" cy="155" r="20" fill="#f0982f"/>
+        <!-- eyebrows -->
+        <rect id="browL" x="86" y="104" width="46" height="9" rx="4.5" fill="#5a3a12"/>
+        <rect id="browR" x="168" y="104" width="46" height="9" rx="4.5" fill="#5a3a12"/>
+        <!-- eyes (white + pupil); #eyeL/#eyeR scaled vertically to blink -->
+        <g id="eyeL"><ellipse cx="109" cy="140" rx="24" ry="26" fill="#fff"/>
+          <circle cx="113" cy="143" r="10" fill="#2b2b2b"/><circle cx="117" cy="139" r="3.2" fill="#fff"/></g>
+        <g id="eyeR"><ellipse cx="191" cy="140" rx="24" ry="26" fill="#fff"/>
+          <circle cx="187" cy="143" r="10" fill="#2b2b2b"/><circle cx="191" cy="139" r="3.2" fill="#fff"/></g>
+        <!-- cheeks -->
+        <circle cx="86" cy="188" r="14" fill="#f6867a" opacity=".45"/>
+        <circle cx="214" cy="188" r="14" fill="#f6867a" opacity=".45"/>
+        <!-- mouth: an ellipse whose rx/ry JS morphs per viseme; #teeth is a lighter cap -->
+        <ellipse id="mouth" cx="150" cy="212" rx="34" ry="4" fill="#4a1f1f"/>
+        <ellipse id="tongue" cx="150" cy="220" rx="18" ry="3" fill="#e06b6b" opacity=".9"/>
+      </g>
+    </svg>
+  </div>
+  <div id="bar"><span id="dot"></span><span id="status">idle</span></div>
+</div>
+
+<div id="overlay">
+  <h2 style="margin:0">Voice Agent Avatar</h2>
+  <p>Tap to connect. Your mic drives the conversation; the cartoon lip-syncs the agent's reply.</p>
+  <button id="start">Connect</button>
+  <div id="err"></div>
+</div>
+
+<script src="./livekit-client.umd.min.js"></script>
+<script src="./avatar.js"></script>
+</body>
+</html>

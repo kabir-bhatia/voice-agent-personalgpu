@@ -16,14 +16,17 @@ import io
 import os
 import re
 import time
+from collections import OrderedDict
 from itertools import count
 
 import numpy as np
 import soundfile as sf
 import torch
 from fastapi import FastAPI, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from transformers import AutoModel
+
+from visemes import text_to_visemes
 
 MODEL_ID = os.environ.get("F5_MODEL", "ai4bharat/IndicF5")
 REF_AUDIO = os.environ.get("F5_REF_AUDIO", os.path.expanduser("~/v6/hindi_tts_out.wav"))
@@ -122,8 +125,39 @@ def _norm_digit(m: re.Match) -> str:
         return s
 
 
+# The digit->word backstop emits HINDI number words, so only apply it for Hindi. For other languages
+# (e.g. Marathi) it would speak Hindi number words; instead rely on the LLM to spell numbers in-language
+# (it is prompted to) and leave any stray digits alone. Set F5_NUMBER_LANG=hi to enable the backstop.
+NUMBER_LANG = os.environ.get("F5_NUMBER_LANG", "hi").lower()
+
+
 def normalize_numbers(text: str) -> str:
+    if NUMBER_LANG != "hi":
+        return text
     return _DIGITS.sub(_norm_digit, text)
+
+
+# --- Viseme timeline cache (for the browser lip-sync avatar) --------------------------------
+# /v1/audio/speech synthesizes each sentence and, while it has the real waveform, computes an
+# energy-accurate viseme timeline and stashes it here keyed on the NORMALIZED sentence text. The
+# agent then calls /v1/visemes with the same sentence text to fetch it (a cache hit uses the
+# audio-accurate timing; a miss falls back to a text-only estimate). Small LRU — a handful of
+# in-flight sentences is all we ever need.
+_VISEME_CACHE: "OrderedDict[str, list]" = OrderedDict()
+_VISEME_CACHE_MAX = 256
+
+
+def _norm_for_visemes(text: str) -> str:
+    return normalize_numbers(expand_acronyms(text)).strip()
+
+
+def _viseme_cache_put(norm_text: str, timeline: list) -> None:
+    if not norm_text:
+        return
+    _VISEME_CACHE[norm_text] = timeline
+    _VISEME_CACHE.move_to_end(norm_text)
+    while len(_VISEME_CACHE) > _VISEME_CACHE_MAX:
+        _VISEME_CACHE.popitem(last=False)
 
 
 print(f"[f5] loading {MODEL_ID} ...")
@@ -236,6 +270,10 @@ async def speech(request: Request):
             f"BENCH_TTS seq={req_id} kind=full synth_seconds={time.time()-t0:.2f} "
             f"audio_seconds={dur:.2f} rtf={(time.time()-t0)/dur:.2f} text={text[:60]!r}"
         )
+        try:
+            _viseme_cache_put(text.strip(), text_to_visemes(text, wav, SAMPLE_RATE))
+        except Exception as e:
+            print(f"[viseme] cache_put failed: {e}")
         buf = io.BytesIO()
         sf.write(buf, wav, SAMPLE_RATE, format="WAV", subtype="PCM_16")
         return Response(content=buf.getvalue(), media_type="audio/wav")
@@ -260,9 +298,47 @@ async def speech(request: Request):
                 f"BENCH_TTS seq={req_id} kind={kind} nfe={_nfe_for(s)} synth_seconds={synth:.2f} "
                 f"audio_seconds={dur:.2f} rtf={rtf:.2f} text={s[:60]!r}"
             )
+            # Audio-accurate viseme timeline for the avatar (from the real waveform), cached for
+            # the agent's /v1/visemes fetch. Cheap (~ms) and off the audio bytes we yield.
+            try:
+                _viseme_cache_put(s.strip(), text_to_visemes(s, wav, SAMPLE_RATE))
+            except Exception as e:  # never let lip-sync break audio
+                print(f"[viseme] cache_put failed: {e}")
             yield _to_pcm16(wav)
 
     return StreamingResponse(_pcm_stream(), media_type="audio/pcm")
+
+
+@app.post("/v1/visemes")
+async def visemes(request: Request):
+    """Return the viseme timeline for a reply's text, for the browser lip-sync avatar.
+
+    The agent calls this per sentence with the SAME text it sent to /v1/audio/speech. We normalize
+    identically, split into the same sentences, and concatenate each sentence's timeline (offset by
+    its predecessors). Cache hits reuse the audio-accurate timing computed during synthesis; misses
+    fall back to a text-only estimate so the avatar still moves.
+    """
+    body = await request.json()
+    text = (body.get("input") or body.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"visemes": [], "hit": False})
+
+    text = _norm_for_visemes(text)
+    timeline: list = []
+    offset = 0
+    all_hit = True
+    for s in _split_sentences(text):
+        key = s.strip()
+        cached = _VISEME_CACHE.get(key)
+        if cached is None:
+            all_hit = False
+            cached = text_to_visemes(s)  # text-only fallback (no waveform)
+        else:
+            _VISEME_CACHE.move_to_end(key)
+        for f in cached:
+            timeline.append({"t": f["t"] + offset, "v": f["v"], "w": f["w"]})
+        offset = timeline[-1]["t"] if timeline else offset
+    return JSONResponse({"visemes": timeline, "hit": all_hit})
 
 
 @app.on_event("startup")
