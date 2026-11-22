@@ -21,6 +21,7 @@ lockfiles, systemd units, and deploy scripts. It does **not** contain secrets, m
 | `deploy/` | vLLM docker run script + captured environment snapshot |
 | `ARCHITECTURE.md` | **Full architecture + every configuration value + step-by-step reproduction** (avatar = §9) |
 | `MARATHI_RESULTS.md` | Second-language (Marathi) validation: latency delta + accuracy vs Hindi |
+| `Swar_AI_Presentation.pdf` | Project slide deck (Swar AI): problem, architecture, models, latency, languages, avatar |
 
 ## Quick start
 
